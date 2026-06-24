@@ -1,15 +1,21 @@
 -- ================================
---   Auto Collect Core v4.1
+--   Auto Buy Vend Core v1.1
+--   Bothax Lua Script
 -- ================================
 
 local config = _G.config
 
 local state = {
-    running   = true,
-    dropping  = false,
-    collected = 0,
-    last_tile = { x = -1, y = -1 },
+    running      = true,
+    phase        = 'warp_vend',
+    bought       = 0,
+    dialog_ready = false,
+    dialog_text  = '',
 }
+
+local function log(msg)
+    LogToConsole('`2[AutoBuy] `7' .. msg)
+end
 
 local function getItemCount()
     for _, item in pairs(GetInventory()) do
@@ -25,16 +31,234 @@ local function getItemName(id)
     return info and info.name or ('ID:' .. id)
 end
 
-local function log(msg)
-    LogToConsole('`2[AutoCollect] `7' .. msg)
+local function isDisconnected()
+    local client = GetClient()
+    local world = GetWorld()
+    if client and client.ping >= 999 then return true end
+    if world == nil then return true end
+    return false
 end
 
-local function getDynamicDelay(dist)
-    local maxDist = 20.0
-    local t = math.min(dist / maxDist, 1.0)
-    return math.floor(config.walk_delay_max - (config.walk_delay_max - config.walk_delay_min) * t)
+local function waitWorld(worldName, timeoutMs)
+    timeoutMs = timeoutMs or 15000
+    local elapsed = 0
+    while elapsed < timeoutMs do
+        local w = GetWorld()
+        if w and w.name:upper() == worldName:upper() then
+            return true
+        end
+        Sleep(500)
+        elapsed = elapsed + 500
+    end
+    return false
 end
 
+local function walkToward(targetX, targetY)
+    local lp = GetLocal()
+    if not lp then return false end
+
+    local px = math.floor(lp.pos.x / 32)
+    local py = math.floor(lp.pos.y / 32)
+
+    if px == targetX and py == targetY then return true end
+
+    local dx = targetX - px
+    local dy = targetY - py
+    local nextX = px + (dx ~= 0 and (dx > 0 and 1 or -1) or 0)
+    local nextY = py + (dy ~= 0 and (dy > 0 and 1 or -1) or 0)
+
+    if CheckPath(nextX, nextY) then
+        FindPath(nextX, nextY)
+    end
+
+    return false
+end
+
+local function walkTo(targetX, targetY, timeoutMs)
+    timeoutMs = timeoutMs or 20000
+    local elapsed = 0
+
+    while state.running do
+        if walkToward(targetX, targetY) then return true end
+        Sleep(config.walk_delay)
+        elapsed = elapsed + config.walk_delay
+        if elapsed >= timeoutMs then
+            log('Timeout jalan ke (' .. targetX .. ',' .. targetY .. ')')
+            return false
+        end
+        local lp = GetLocal()
+        if lp then
+            if math.floor(lp.pos.x / 32) == targetX and
+               math.floor(lp.pos.y / 32) == targetY then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Wrench tile untuk buka dialog vend
+local function wrenchTile(x, y)
+    SendPacketRaw(false, {
+        type  = 3,
+        value = 32,  -- wrench
+        px    = x,
+        py    = y,
+        x     = x * 32,
+        y     = y * 32,
+    })
+end
+
+-- Hook tangkap dialog vend
+AddHook('OnVariant', 'AutoBuyDialog', function(var)
+    if var[0] == 'OnDialogRequest' then
+        local text = var[1] or ''
+        if text:find('vend') or text:find('store_item') or text:find('buy_item') then
+            state.dialog_ready = true
+            state.dialog_text  = text
+            log('Dialog vend tertangkap!')
+            return true
+        end
+    end
+end)
+
+local function getDialogName(text)
+    return text:match('end_dialog|([^|]+)') or 'vending_store'
+end
+
+local function buyFromDialog()
+    if not state.dialog_ready then return false end
+
+    local dname = getDialogName(state.dialog_text)
+    log('Beli dari dialog: ' .. dname)
+
+    SendPacket(2, 'action|dialog_return\ndialog_name|' .. dname .. '\nbuttonClicked|buy')
+    Sleep(config.action_delay)
+
+    state.dialog_ready = false
+    state.dialog_text  = ''
+    return true
+end
+
+local function dropItem()
+    local count = getItemCount()
+    if count > 0 then
+        SendPacket(2, 'action|drop\n|itemid|' .. config.item_id)
+        Sleep(config.action_delay)
+        log('Drop ' .. count .. 'x ' .. getItemName(config.item_id) .. ' berhasil!')
+        state.bought = state.bought + count
+    end
+end
+
+-- ======= MAIN LOOP =======
+
+local function mainLoop()
+    log('Mulai! Target: `6' .. getItemName(config.item_id) ..
+        ' `7| Vend: `6' .. config.vend_world ..
+        ' `7| Storage: `6' .. config.storage_world)
+
+    while state.running do
+
+        if isDisconnected() then
+            log('`4Disconnect! Tunggu ' .. (config.reconnect_delay/1000) .. ' detik...')
+            Sleep(config.reconnect_delay)
+            state.phase = 'warp_vend'
+        end
+
+        -- FASE: WARP KE VEND
+        if state.phase == 'warp_vend' then
+            log('Warp ke: `6' .. config.vend_world)
+            RequestJoinWorld(config.vend_world)
+            Sleep(config.warp_delay)
+
+            if waitWorld(config.vend_world, 10000) then
+                log('Masuk `6' .. config.vend_world)
+                Sleep(config.action_delay)
+                state.phase = 'walk_vend'
+            else
+                log('`4Gagal masuk vend world, retry...')
+                Sleep(3000)
+            end
+
+        -- FASE: JALAN KE VEND
+        elseif state.phase == 'walk_vend' then
+            log('Jalan ke vend (' .. config.vend_x .. ',' .. config.vend_y .. ')...')
+
+            if walkTo(config.vend_x, config.vend_y, 20000) then
+                Sleep(500)
+                state.phase = 'buy'
+            else
+                log('`4Gagal jalan ke vend, warp ulang...')
+                state.phase = 'warp_vend'
+            end
+
+        -- FASE: BELI ITEM
+        elseif state.phase == 'buy' then
+            log('Wrench vend...')
+            state.dialog_ready = false
+
+            wrenchTile(config.vend_x, config.vend_y)
+            Sleep(config.action_delay)
+
+            -- Tunggu dialog max 3 detik
+            local waited = 0
+            while not state.dialog_ready and waited < 3000 do
+                Sleep(200)
+                waited = waited + 200
+            end
+
+            if state.dialog_ready then
+                buyFromDialog()
+                Sleep(config.action_delay)
+
+                local count = getItemCount()
+                log('Inventory: `6' .. count .. '/' .. config.buy_amount)
+
+                if count >= config.buy_amount then
+                    state.phase = 'warp_storage'
+                end
+            else
+                log('`4Dialog tidak muncul, wrench ulang...')
+                Sleep(1000)
+            end
+
+        -- FASE: WARP KE STORAGE
+        elseif state.phase == 'warp_storage' then
+            log('Inventory penuh! Warp ke: `6' .. config.storage_world)
+            RequestJoinWorld(config.storage_world)
+            Sleep(config.warp_delay)
+
+            if waitWorld(config.storage_world, 10000) then
+                log('Masuk `6' .. config.storage_world)
+                Sleep(config.action_delay)
+                state.phase = 'drop'
+            else
+                log('`4Gagal masuk storage, retry...')
+                Sleep(3000)
+            end
+
+        -- FASE: DROP ITEM
+        elseif state.phase == 'drop' then
+            log('Jalan ke drop point (' .. config.storage_x .. ',' .. config.storage_y .. ')...')
+
+            if walkTo(config.storage_x, config.storage_y, 20000) then
+                Sleep(500)
+                dropItem()
+                log('Total terkumpul: `6' .. state.bought .. ' item')
+                Sleep(config.action_delay)
+                state.phase = 'warp_vend'
+            else
+                log('`4Gagal jalan ke drop point, retry...')
+            end
+        end
+
+        Sleep(300)
+    end
+
+    log('Selesai. Total: `6' .. state.bought .. ' item terbeli.')
+end
+
+RunThread(mainLoop)
 local function walkToward(targetX, targetY)
     local lp = GetLocal()
     if not lp then return false, 0 end
