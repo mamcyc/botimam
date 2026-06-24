@@ -1,6 +1,5 @@
 -- ================================
---   Auto Collect Core v4.0
---   github.com/username/repo
+--   Auto Collect Core v4.1
 -- ================================
 
 local config = _G.config
@@ -53,20 +52,17 @@ local function walkToward(targetX, targetY)
     local nextY = py + (dy ~= 0 and (dy > 0 and 1 or -1) or 0)
 
     if CheckPath(nextX, nextY) then
-        SendPacket(0, string.format(
-            'action|input\nnetid|-1\ntype|0\nx|%d\ny|%d',
-            nextX * 32 + 16,
-            nextY * 32 + 16
-        ))
-    else
         FindPath(nextX, nextY)
+        Sleep(config.walk_delay_min)
+    else
+        log('Tile (' .. nextX .. ',' .. nextY .. ') blocked, skip.')
     end
 
     return false, dist
 end
 
 local function walkTo(targetX, targetY, timeoutMs)
-    timeoutMs = timeoutMs or 8000
+    timeoutMs = timeoutMs or 30000
     local elapsed = 0
 
     while state.running do
@@ -75,7 +71,7 @@ local function walkTo(targetX, targetY, timeoutMs)
 
         local delay = getDynamicDelay(dist)
         Sleep(delay)
-        elapsed = elapsed + delay
+        elapsed = elapsed + delay + config.walk_delay_min
 
         if elapsed >= timeoutMs then
             log('Timeout jalan ke (' .. targetX .. ',' .. targetY .. '), skip.')
@@ -96,16 +92,11 @@ local function doDropItem()
     state.dropping = true
     log('Inventory penuh! Jalan ke drop point (' .. config.drop_x .. ',' .. config.drop_y .. ')...')
 
-    if walkTo(config.drop_x, config.drop_y, 10000) then
-        Sleep(300)
+    if walkTo(config.drop_x, config.drop_y, 30000) then
+        Sleep(500)
         local count = getItemCount()
         if count > 0 then
-            SendPacketRaw(false, {
-                type  = 10,
-                value = config.item_id,
-                int_x = config.drop_x,
-                int_y = config.drop_y,
-            })
+            SendPacket(2, 'action|drop\n|itemid|' .. config.item_id)
             state.collected = state.collected + count
             log('Drop ' .. count .. 'x ' .. getItemName(config.item_id) .. ' berhasil! Total: ' .. state.collected)
             Sleep(800)
@@ -153,7 +144,7 @@ local function collectLoop()
                         state.last_tile = { x = nearest.x, y = nearest.y }
                         log('Jalan ke item (' .. nearest.x .. ',' .. nearest.y .. ') | delay=' .. getDynamicDelay(nearestDist) .. 'ms')
                     end
-                    walkTo(nearest.x, nearest.y, 6000)
+                    walkTo(nearest.x, nearest.y, 30000)
                     Sleep(100)
                 else
                     Sleep(config.scan_delay)
